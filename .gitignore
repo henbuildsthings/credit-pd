@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# uv / virtualenv
+.venv/
+
+# Data & artifacts
+data/raw/
+mlruns/
+mlflow.db
+logs/
+
+# Secrets
+.env

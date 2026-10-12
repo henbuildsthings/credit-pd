@@ -1,0 +1,41 @@
+[project]
+name = "credit-pd"
+version = "0.1.0"
+description = "Credit default (PD) scoring service: a small end-to-end MLOps learning project"
+readme = "README.md"
+authors = [
+    { name = "Henning Rydström", email = "264811465+henbuildsthings@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.143.0",
+    "mlflow>=3.17.0",
+    "pandas>=3.0.6",
+    "pandera>=0.34.1",
+    "pyarrow>=25.0.1",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.9.1",
+    "uvicorn>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
