@@ -25,9 +25,14 @@ models:
     learning_rate: 0.05
     max_depth: 3
 
+# Experiment tracking and model registry (local MLflow; the registry of record).
+mlflow:
+  tracking_uri: sqlite:///mlflow.db # relative paths resolve from the repo root
+  artifact_dir: mlruns # where run artifacts and logged models are stored
+  experiment_name: credit-pd
+  registered_model_name: credit-pd
+
 paths:
   raw: data/raw/credit-g.parquet
   splits: data/processed/splits.parquet
   manifest: data/manifest.json
-  model: models/model.joblib
-  metrics: reports/metrics.json

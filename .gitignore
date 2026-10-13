@@ -19,8 +19,6 @@ data/processed/
 mlruns/
 mlflow.db
 logs/
-models/
-reports/
 
 # Secrets
 .env

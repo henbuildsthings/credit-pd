@@ -5,7 +5,8 @@ Modules:
     data      fetch, validate, version and split the data (`make ingest`)
     features  preprocessing step of every model Pipeline
     metrics   PD evaluation: AUC, KS, Brier, calibration
-    train     fit candidates, pick on val, test once, save (`make train`)
+    train     fit candidates, pick on val, test once, register in MLflow (`make train`)
+    registry  MLflow setup, list/promote versions, load the champion
 """
 
 from importlib.metadata import version

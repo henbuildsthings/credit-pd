@@ -1,8 +1,10 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup lint format test loc ingest train serve monitor clean
+# Silence MLflow's coding-agent hint printed on every import.
+export MLFLOW_DISABLE_AGENT_HINT := 1
+.PHONY: help setup lint format test loc ingest train models promote mlflow-ui serve monitor clean
 
 help: ## List targets
-	@grep -E '^[a-z]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
 
 setup: ## Install deps and git hooks
 	uv sync
@@ -27,6 +29,16 @@ ingest: ## Download and split data
 
 train: ## Train and log a model
 	uv run python -m credit_pd.train
+
+models: ## List registered model versions
+	uv run python -m credit_pd.registry list
+
+promote: ## Set champion alias: make promote VERSION=n REASON="..."
+	uv run python -m credit_pd.registry promote --version "$(VERSION)" --reason "$(REASON)"
+
+# Backend URI must match mlflow.tracking_uri in config.yaml.
+mlflow-ui: ## Open the MLflow UI on http://localhost:5000
+	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
 
 serve: ## Run the scoring API
 	@echo "not implemented (module 6)"

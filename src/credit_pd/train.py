@@ -1,4 +1,4 @@
-"""Training: fit candidate models, pick one on val, test it once, save it.
+"""Training: fit candidate models, pick one on val, test it once, register it in MLflow.
 
 Run with `make train` or `python -m credit_pd.train` (after `make ingest`).
 
@@ -9,23 +9,32 @@ Steps:
     3. Evaluate them all on val and pick the winner by val AUC.
     4. Evaluate only the winner on test, once. Test is the unbiased estimate of
        performance; looking at it for every candidate would turn it into a second val set.
-    5. Save the winning Pipeline to `models/model.joblib` and all metrics to
-       `reports/metrics.json` (both gitignored; MLflow takes over in Module 4).
+    5. Log it all to MLflow and register the winner as a new model version.
+
+MLflow layout: one parent run per `make train`, carrying the reproducibility tags (git
+SHA, dirty flag, data hash, uv.lock hash, seed), the winner's metrics and the model. Each
+candidate gets a nested child run with its params and val metrics. Registering does not
+deploy: the new version has no alias until someone runs `make promote`.
 """
 
+import hashlib
 import json
+import sys
 
-import joblib
+import mlflow
+import mlflow.sklearn
 import pandas as pd
+from mlflow.models import infer_signature
 from sklearn.base import ClassifierMixin
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
-from credit_pd.config import load_config, path
+from credit_pd.config import ROOT, load_config, path
 from credit_pd.features import NON_FEATURES, build_preprocessor
 from credit_pd.metrics import evaluate
+from credit_pd.registry import git, setup_mlflow
 
 # Model names used in config.yaml -> sklearn classes. Config holds only the parameters.
 MODEL_CLASSES: dict[str, type[ClassifierMixin]] = {
@@ -64,31 +73,79 @@ def xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     return df.drop(columns=NON_FEATURES), df["default"]
 
 
+def run_tags(cfg: dict) -> dict[str, str]:
+    """The reproducibility contract: everything needed to recreate this exact model.
+
+    Code (git SHA + whether there were uncommitted changes), data (content hash from the
+    committed manifest), environment (hash of uv.lock) and randomness (seed). A dirty
+    working tree means the SHA doesn't fully describe the code, so it prints a warning.
+    """
+    dirty = bool(git("status", "--porcelain"))
+    if dirty:
+        warning = "WARNING: uncommitted changes; git_sha does not fully describe this code."
+        print(warning, file=sys.stderr)
+    manifest = json.loads(path(cfg, "manifest").read_text())
+    return {
+        "git_sha": git("rev-parse", "HEAD"),
+        "git_dirty": str(dirty).lower(),
+        "data_sha256": manifest["content_sha256"],
+        "uv_lock_sha256": hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest(),
+        "seed": str(cfg["seed"]),
+    }
+
+
+def scalars(metrics: dict, prefix: str) -> dict[str, float]:
+    """Numeric entries of an `evaluate` result, prefixed for MLflow (e.g. `val_auc`)."""
+    return {f"{prefix}_{k}": v for k, v in metrics.items() if isinstance(v, float)}
+
+
+def calibration(metrics: dict) -> pd.DataFrame:
+    """The calibration table of an `evaluate` result as a DataFrame indexed by decile."""
+    return pd.DataFrame(metrics["calibration"]).set_index("bin")
+
+
 def train() -> None:
-    """Fit, compare on val, test the winner once, save model + metrics, print a report."""
+    """Fit, compare on val, test the winner once, log + register in MLflow, print a report."""
     cfg = load_config()
+    model_name = setup_mlflow(cfg)
     splits = load_splits(cfg)
     X_train, y_train = xy(splits["train"])
     X_val, y_val = xy(splits["val"])
 
-    # Fit on train only; compare on val. predict_proba[:, 1] = P(default).
-    val_metrics = {}
-    fitted = {}
-    for name, pipe in build_pipelines(cfg, splits["train"]).items():
-        fitted[name] = pipe.fit(X_train, y_train)
-        val_metrics[name] = evaluate(y_val, pipe.predict_proba(X_val)[:, 1])
-    winner = max(val_metrics, key=lambda name: val_metrics[name]["auc"])
+    with mlflow.start_run(run_name="train") as parent:
+        mlflow.set_tags(run_tags(cfg))
 
-    # The single look at test, for the winner only.
-    X_test, y_test = xy(splits["test"])
-    test_metrics = evaluate(y_test, fitted[winner].predict_proba(X_test)[:, 1])
+        # Fit on train only; compare on val. predict_proba[:, 1] = P(default).
+        val_metrics, fitted = {}, {}
+        for name, pipe in build_pipelines(cfg, splits["train"]).items():
+            with mlflow.start_run(run_name=name, nested=True):
+                fitted[name] = pipe.fit(X_train, y_train)
+                val_metrics[name] = evaluate(y_val, pipe.predict_proba(X_val)[:, 1])
+                mlflow.log_params({"model": name, **cfg["models"][name]})
+                mlflow.log_metrics(scalars(val_metrics[name], "val"))
+        winner = max(val_metrics, key=lambda name: val_metrics[name]["auc"])
+        model = fitted[winner]
 
-    model_path, metrics_path = path(cfg, "model"), path(cfg, "metrics")
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(fitted[winner], model_path)
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    report = {"winner": winner, "val": val_metrics, "test": test_metrics}
-    metrics_path.write_text(json.dumps(report, indent=2) + "\n")
+        # The single look at test, for the winner only.
+        X_test, y_test = xy(splits["test"])
+        test_metrics = evaluate(y_test, model.predict_proba(X_test)[:, 1])
+
+        mlflow.set_tag("winner", winner)
+        mlflow.log_params({"model": winner, **cfg["models"][winner]})
+        mlflow.log_metrics(scalars(val_metrics[winner], "val") | scalars(test_metrics, "test"))
+        for split_name, m in (("val", val_metrics[winner]), ("test", test_metrics)):
+            mlflow.log_text(calibration(m).to_csv(), f"calibration_{split_name}.csv")
+
+        # Signature/example from raw features: the model's contract is raw rows in, and
+        # (via pyfunc_predict_fn) class probabilities out, column 1 = P(default).
+        info = mlflow.sklearn.log_model(
+            model,
+            name="model",
+            signature=infer_signature(X_train, model.predict_proba(X_train)),
+            input_example=X_train.head(3),
+            pyfunc_predict_fn="predict_proba",
+            registered_model_name=model_name,
+        )
 
     cols = ["auc", "ks", "brier", "mean_pred"]
     comparison = pd.DataFrame(val_metrics).T[cols].astype(float)
@@ -98,8 +155,9 @@ def train() -> None:
     print("Test (winner only):")
     print(pd.Series({k: test_metrics[k] for k in cols}).round(4).to_string(), end="\n\n")
     print(f"Val calibration by predicted-PD decile ({winner}):")
-    print(pd.DataFrame(val_metrics[winner]["calibration"]).set_index("bin").round(3).to_string())
-    print(f"\nSaved {model_path.name} and {metrics_path.name}")
+    print(calibration(val_metrics[winner]).round(3).to_string())
+    print(f"\nMLflow run: {parent.info.run_id}")
+    print(f"Registered {model_name} version {info.registered_model_version} (no alias set)")
 
 
 if __name__ == "__main__":
