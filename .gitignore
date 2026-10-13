@@ -15,6 +15,7 @@ htmlcov/
 
 # Data & artifacts
 data/raw/
+data/processed/
 mlruns/
 mlflow.db
 logs/

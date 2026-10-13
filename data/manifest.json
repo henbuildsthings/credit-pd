@@ -1,0 +1,49 @@
+{
+  "source": "openml",
+  "data_id": 31,
+  "n_rows": 1000,
+  "n_cols": 21,
+  "columns": [
+    "checking_status",
+    "duration",
+    "credit_history",
+    "purpose",
+    "credit_amount",
+    "savings_status",
+    "employment",
+    "installment_commitment",
+    "personal_status",
+    "other_parties",
+    "residence_since",
+    "property_magnitude",
+    "age",
+    "other_payment_plans",
+    "housing",
+    "existing_credits",
+    "job",
+    "num_dependents",
+    "own_telephone",
+    "foreign_worker",
+    "default"
+  ],
+  "content_sha256": "df81eff24a4e3ad5fc9937f52b31016c7099d483e184890e1dd3fbdee1755eea",
+  "seed": 42,
+  "splits": {
+    "train": {
+      "n_rows": 550,
+      "default_rate": 0.3
+    },
+    "val": {
+      "n_rows": 150,
+      "default_rate": 0.3
+    },
+    "test": {
+      "n_rows": 150,
+      "default_rate": 0.3
+    },
+    "future": {
+      "n_rows": 150,
+      "default_rate": 0.3
+    }
+  }
+}

@@ -1,2 +1,19 @@
-# Project config. Splits, decision bands, etc. are added in later modules.
+# Project config. Decision bands etc. are added in later modules.
 seed: 42
+
+data:
+  openml_data_id: 31 # credit-g; always fetched by pinned id, never by name
+  target: class
+  positive_label: bad
+
+split: # stratified on data.target, seeded by seed
+  fractions: # last split absorbs rounding
+    train: 0.55
+    val: 0.15
+    test: 0.15
+    future: 0.15 # never used in training
+
+paths:
+  raw: data/raw/credit-g.parquet
+  splits: data/processed/splits.parquet
+  manifest: data/manifest.json

@@ -20,7 +20,7 @@ test: ## Run tests
 	uv run pytest
 
 ingest: ## Download and split data
-	@echo "not implemented (module 2)"
+	uv run python -m credit_pd.data
 
 train: ## Train and log a model
 	@echo "not implemented (module 3)"
