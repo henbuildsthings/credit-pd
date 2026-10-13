@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help setup lint format test ingest train serve monitor clean
+.PHONY: help setup lint format test loc ingest train serve monitor clean
 
 help: ## List targets
 	@grep -E '^[a-z]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -18,6 +18,9 @@ format: ## Auto-fix lint and format code
 
 test: ## Run tests
 	uv run pytest
+
+loc: ## Count code lines vs the ~800 budget
+	uv run python scripts/loc.py
 
 ingest: ## Download and split data
 	uv run python -m credit_pd.data
