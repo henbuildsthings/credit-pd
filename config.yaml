@@ -13,7 +13,21 @@ split: # stratified on data.target, seeded by seed
     test: 0.15
     future: 0.15 # never used in training
 
+# Candidate models for `make train`: name -> constructor params. Each is wrapped in a
+# Pipeline with the preprocessor and seeded from `seed`. The winner is picked by val AUC.
+models:
+  baseline: # DummyClassifier: predicts the training default rate for everyone
+    strategy: prior
+  logreg: # LogisticRegression
+    max_iter: 1000
+  gbm: # HistGradientBoostingClassifier
+    max_iter: 200
+    learning_rate: 0.05
+    max_depth: 3
+
 paths:
   raw: data/raw/credit-g.parquet
   splits: data/processed/splits.parquet
   manifest: data/manifest.json
+  model: models/model.joblib
+  metrics: reports/metrics.json

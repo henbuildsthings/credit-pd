@@ -17,6 +17,11 @@ Running log of what was built, why, and what I should be able to explain.
 - **Ingest is strict and idempotent.** Any mismatch with the manifest (hash, seed, split sizes) raises and writes nothing. Data only changes deliberately, with `--force`.
 - **Schema is a pandera `DataFrameModel` with `strict=True`.** Explicit types, allowed category values taken from the data, ranges on age, amount and duration. Validation errors list every failure at once (`lazy=True`).
 - **Splits are stored as one parquet file with a `split` column.** Integer split sizes, so float fractions can't turn 150 into 149.
+- **Preprocessing lives inside the sklearn Pipeline, fitted on train only.** Scaling and one-hot encoding are part of the saved model, so serving applies exactly the transforms learned in training.
+- **Train fits, val selects (by AUC), test is touched once, for the winner only.** Looking at test for every candidate would turn it into a second val set.
+- **Baseline = `DummyClassifier(strategy="prior")`.** Predicts the training default rate for everyone (AUC 0.5); any real model must clearly beat it.
+- **Sensible defaults, no hyperparameter tuning.** Model settings live in `config.yaml` under `models`; with 550 training rows, tuning would mostly fit noise.
+- **`joblib` is declared explicitly in `pyproject.toml`** because `src/` imports it, even though scikit-learn already pulls it in.
 - **Dev environment:** WSL2 Ubuntu, with the project in the Linux filesystem (not OneDrive or `/mnt/c`).
 
 ## Commands
@@ -39,6 +44,10 @@ Running log of what was built, why, and what I should be able to explain.
 - `make ingest` — run `python -m credit_pd.data`: fetch or load the raw data, validate, hash, split, and check against `data/manifest.json`.
 - `uv run python -m credit_pd.data --force` — re-download and rewrite the manifest (for a deliberate data update).
 - `python -m <package.module>` — run a module inside the installed package as a script, so the package imports work.
+
+### Module 3 — Training pipeline
+
+- `make train` — run `python -m credit_pd.train`: fit all models on train, compare on val, test the winner once, save `models/model.joblib` and `reports/metrics.json`.
 
 ## Interview questions
 
@@ -67,7 +76,19 @@ Fail fast, at the boundary where the bad data comes in, with a clear message. A 
 **Q4. Why a "future" split, and why stratify?**
 "Future" is held out from all training and tuning, to simulate later data for monitoring and final checks. Stratifying keeps the default rate (30%) the same in every split, so the small 150-row splits aren't skewed by chance.
 
+### Module 3 — Training pipeline
+
+**Q1. How does putting preprocessing in the Pipeline prevent train/serve skew and leakage?**
+The fitted preprocessing travels inside the model object, so serving applies identical transforms with no re-implementation in the API. Fitting the scaler before splitting would leak val/test statistics (means, variances) into training and inflate the scores.
+
+**Q2. Logistic regression beat gradient boosting by 0.006 AUC on 150 val rows. What do you conclude?**
+That it's noise: the AUC standard error is about 0.04 with 45 defaults. Call the two equivalent and prefer logistic regression as simpler and better calibrated. For real certainty, use cross-validation or bootstrap confidence intervals.
+
+**Q3. Two models have the same AUC, but one predicts a mean PD of 25% when 30% actually default. Which do you deploy?**
+The calibrated one. Decision bands use the absolute PD level, and AUC is blind to it. Otherwise, recalibrate (Platt scaling or isotonic regression) on held-out data.
+
 ## Lessons
 
 - **Module 1:** the pre-commit large-file guard flagged `uv.lock` (a false positive) — tune guardrails, don't disable them.
 - **Module 2:** pandera's default error message dumps the whole schema for one extra column. Wrapping it to show only column, check and failing value was worth the extra lines. The line budget is a guide: trimming 153 → 139 was free, but going further meant dropping safeguards, so I stopped.
+- **Module 3:** my prediction (GBM ~0.80 AUC) was wrong — logistic regression won 0.743 vs 0.737 on val; small, mostly linear tabular data favours GLM-like models. GBM under-predicted the level by 4.5 pp (mean_pred 0.255 vs 0.300), which AUC can't see. With 15 rows per decile, calibration bins carry ~12 pp of noise, and the val/test AUC gap (0.74 vs 0.79) is noise too. Loading a joblib/pickle file executes code — only load trusted files.

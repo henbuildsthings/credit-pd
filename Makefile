@@ -26,7 +26,7 @@ ingest: ## Download and split data
 	uv run python -m credit_pd.data
 
 train: ## Train and log a model
-	@echo "not implemented (module 3)"
+	uv run python -m credit_pd.train
 
 serve: ## Run the scoring API
 	@echo "not implemented (module 6)"
