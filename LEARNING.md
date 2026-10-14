@@ -2,6 +2,22 @@
 
 Running log of what was built, why, and what I should be able to explain.
 
+## Roadmap
+
+1. ✅ Repo and environment — uv package, pre-commit, Makefile, guardrails.
+2. ✅ Data ingestion — pinned fetch, strict schema, content hash, manifest, seeded 4-way split.
+3. ✅ Training pipeline — baseline / logreg / GBM Pipelines, select on val, test once.
+4. ✅ MLflow tracking and registry — nested runs, reproducibility tags, champion alias, promotion gate.
+5. ✅ Testing — unit, model sanity, smoke and ops tests; offline and isolated.
+6. ✅ FastAPI serving — champion loaded at startup, `/health`, `/score` with decision bands.
+7. *(to be defined)*
+8. *(to be defined)*
+9. Monitoring — drift on the `future` split (`make monitor`).
+10. *(to be defined)*
+11. Codebase walkthrough — trace a request and a training run through every file; one-page system diagram.
+12. Claude Code power use — slash commands, context management, plan mode, permissions, CLAUDE.md, custom commands.
+13. Feature branch end-to-end — new model on a branch → PR → break and fix tests → CI → merge → promotion gate → rollback.
+
 ## Working from the terminal
 
 Generated from the `Makefile` and `src/`; keep it in sync when targets change.
@@ -323,3 +339,4 @@ Reject it with 422. Scoring garbage gives a confident, wrong PD — a silent fai
 - **Module 5:** flaky-test causes — I picked network + time, and missed unseeded randomness and exact float equality. I'd also have pointed the tests at the real `mlflow.db`; a per-test throwaway registry is the fix.
 - **Module 5 (sabotage):** shuffled training labels were caught only by the AUC floor. "Beats baseline" passed on noise (now fixed with a margin). Mean PD passed — correctly: ranking and level are independent, so you need both checks. My prediction (the first two fail) was half right. Safe revert trick: stage the current file before `git restore`, so it restores today's version, not the last commit.
 - **Module 6:** my latency prediction (~100 ms) was wrong — it's ~20 ms and flat (no cold start; the model is loaded at startup). The model itself takes microseconds; the time goes to HTTP, validation, building the DataFrame and encoding. Use the API for single decisions, batch scoring for portfolios.
+- **Module 6:** never act on a process you didn't start — check the port first (`ss -ltnp | grep 8000`).
