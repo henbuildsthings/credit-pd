@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 # Silence MLflow's coding-agent hint printed on every import.
 export MLFLOW_DISABLE_AGENT_HINT := 1
-.PHONY: help setup lint format test loc ingest train models promote mlflow-ui serve monitor clean
+.PHONY: help setup lint format test test-fast loc ingest train models promote mlflow-ui serve monitor clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -18,8 +18,11 @@ format: ## Auto-fix lint and format code
 	uv run ruff check --fix .
 	uv run ruff format .
 
-test: ## Run tests
-	uv run pytest
+test: ## Run all tests (incl. integration: needs make ingest)
+	uv run pytest -v
+
+test-fast: ## Run tests except integration (no data needed)
+	uv run pytest -v -m "not integration"
 
 loc: ## Count code lines vs the ~800 budget
 	uv run python scripts/loc.py

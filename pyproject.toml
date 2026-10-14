@@ -39,3 +39,4 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: needs real data (data/processed/splits.parquet from make ingest)"]

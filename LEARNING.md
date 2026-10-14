@@ -33,7 +33,8 @@ Every target follows the same chain: `make <target>` → `uv run ...` → a modu
 | `setup` | `uv sync`, `pre-commit install` | Installs deps and git hooks | `pyproject.toml`, `uv.lock` | `.venv/`, `.git/hooks/pre-commit` | yes |
 | `lint` | `ruff check`, `ruff format --check` | Checks lint and formatting; fails, doesn't fix | `*.py` | — | yes |
 | `format` | `ruff check --fix`, `ruff format` | Auto-fixes lint and formatting | `*.py` | `*.py` in place | yes (review the diff) |
-| `test` | `pytest` | Runs tests (none yet — Module 5; fails until then) | `tests/` | `.pytest_cache/` | yes |
+| `test` | `pytest -v` | All 17 tests, incl. integration (model sanity on real data) | `tests/`, `data/processed/splits.parquet` | `.pytest_cache/`; MLflow only in temp dirs | yes |
+| `test-fast` | `pytest -v -m "not integration"` | Unit, smoke and ops tests; no data needed (~8 s) | `tests/` | `.pytest_cache/`; MLflow only in temp dirs | yes |
 | `loc` | `scripts/loc.py` | Code / total lines vs the ~800 budget | `src/`, `tests/` | — | yes |
 | `ingest` | `credit_pd.data` | Fetch/load, validate, hash, split; checks manifest | `config.yaml`, `data/manifest.json`, OpenML if raw missing | `data/raw/`, `data/processed/splits.parquet`, manifest on first run | yes (fails loudly on mismatch) |
 | `train` | `credit_pd.train` | Fits 3 models, picks on val, tests winner, registers it | `config.yaml`, splits, manifest, `uv.lock`, git | `mlflow.db`, `mlruns/` — **a new model version every run** | yes, but adds a version |
@@ -61,9 +62,10 @@ make setup          # cheap; picks up dependency changes
 make models         # what's registered, what's champion
 ```
 
-**Change code → lint → commit → train → promote**
+**Change code → lint → test → commit → train → promote**
 ```bash
 make format && make lint
+make test
 git add -A && git commit -m "..."
 make train          # note the new version number
 make models         # compare it with the current champion
@@ -112,6 +114,40 @@ make train                                # retrain on the new data (after the c
 | `Refusing to promote ... uncommitted code` | That version was trained with `git_dirty=true` | Commit, `make train`, promote the new version |
 | `mlflow ui`: port 5000 already in use | An old UI is still running | Ctrl+C it in its terminal, or `ss -ltnp \| grep :5000` and `kill <pid>` |
 
+## Concepts
+
+### MLflow: generic tool, our conventions
+
+Generic MLflow gives you runs (params, metrics, artifacts, tags), a UI, and a model registry with versions and aliases. It's the same MLflow that Databricks / Unity Catalog uses. What MLflow does *not* decide, and this project does:
+- **Reproducibility tags** on every training run: `git_sha`, `git_dirty`, `data_sha256`, `uv_lock_sha256`, `seed`.
+- **Rules:** only the winner is registered; promotion is a manual gate (`make promote`); no promotion of dirty versions; rollback = move the `champion` alias.
+- **What a model is:** the full sklearn Pipeline (preprocessing + model), logged with a signature on raw features.
+
+### Test types
+
+| Type | Checks | Catches | Here |
+|---|---|---|---|
+| Unit | One function on small, hand-made data | Logic bugs: schema too loose, hash unstable, split not stratified | `test_data.py`, `test_features.py` |
+| Model sanity (performance floor) | Real model on real data clears minimum metrics | A broken pipeline: leakage removed, features dropped, wrong target | `test_model.py` (`integration`) |
+| Smoke | The entry point runs end to end | Wiring: imports, config keys, MLflow calls, return values | `test_pipeline.py` |
+| Ops | The tooling around the model | Registry/list/promote bugs: invisible champion, dirty promotion | `test_registry.py` |
+
+### Flaky tests
+
+A flaky test passes or fails without the code changing. Causes and fixes:
+- **Network** (downloads, APIs) → fixtures with local data; `sample_df` is generated, never fetched.
+- **Unseeded randomness** → seed everything (`np.random.default_rng(0)`, `random_state=seed`).
+- **Time/date dependence** → don't read the clock in assertions.
+- **Exact float equality** → thresholds (`auc > 0.70`) or `pytest.approx`.
+
+### Performance floor
+
+Set the floor below the observed metric by a noise margin: val AUC 0.743 with a standard error of ~0.04 → floor 0.70. A floor catches breakage, not small regressions — a 0.01 drop is within noise and needs a proper comparison (CV, bootstrap), not a unit test.
+
+### Tests never touch real state
+
+Every MLflow test gets a throwaway tracking DB and artifact folder in `tmp_path` (`tmp_mlflow` fixture). Otherwise tests would register junk versions in the real `mlflow.db`, or move the real champion. Verified: the real `mlflow.db` checksum is unchanged after `make test`.
+
 ## Decisions
 
 - **Deployable unit = full sklearn Pipeline.** Preprocessing lives inside the pipeline; the API does no preprocessing of its own.
@@ -138,6 +174,11 @@ make train                                # retrain on the new data (after the c
 - **`promote` refuses versions trained with `git_dirty=true`.** Enforced, with no override flag: commit and retrain.
 - **Every training run is tagged with** `git_sha`, `git_dirty`, `data_sha256`, `uv_lock_sha256` and `seed`.
 - **MLflow's agent hint is silenced** (`MLFLOW_DISABLE_AGENT_HINT=1` in the Makefile): noisy logs hide real warnings.
+- **Tests are offline, deterministic and isolated.** A generated, seeded `sample_df` fixture instead of downloads; a throwaway MLflow (`tmp_mlflow`) per test, never the real `mlflow.db`.
+- **Integration tests on real data skip if the data is missing** (`make ingest` first), with a clear reason.
+- **Performance floor = 0.70 val AUC** (observed 0.743 minus a noise margin); **logreg must beat the baseline by 0.10 AUC.**
+- **`train()` takes a config and data** so tests can drive it; with no arguments it uses `config.yaml` and the splits file.
+- **The `data_sha256` tag hashes the rows actually trained on**, not the manifest value; for real runs the two are identical.
 - **Dev environment:** WSL2 Ubuntu, with the project in the Linux filesystem (not OneDrive or `/mnt/c`).
 
 ## Commands
@@ -170,6 +211,12 @@ make train                                # retrain on the new data (after the c
 - `make models` — list registered versions with aliases, val/test AUC, data hash, git SHA, git_dirty and creation time.
 - `make promote VERSION=n REASON="..."` — move the `champion` alias to version n, tag who/when/why/previous, and smoke-score 3 test rows. Refuses dirty versions.
 - `make mlflow-ui` — MLflow web UI on http://localhost:5000 (Ctrl+C to stop).
+
+### Module 5 — Testing
+
+- `make test` — run all tests (`pytest -v`), including integration tests on real data.
+- `make test-fast` — everything except integration (`pytest -v -m "not integration"`); no data needed.
+- `uv run pytest -v -m integration` — only the model sanity tests on real data.
 
 ## Interview questions
 
@@ -220,6 +267,17 @@ The API asks for "champion", so promoting or rolling back just moves the alias �
 **Q3. An auditor asks how a specific decision was made. How do you trace it?**
 The prediction log gives the model version (Module 9) → its training run → `git_sha` (with `git_dirty=false`), `data_sha256` (compare with the manifest), `uv_lock_sha256` and `seed`. Check out that commit, run `make ingest` (the hash must match) and `make train` to reproduce the model. The promotion tags say who promoted it, when and why.
 
+### Module 5 — Testing
+
+**Q1. What makes tests flaky, and how do you fix it?**
+Network → fixtures with local data; unseeded randomness → seeds; time dependence → no clock in assertions, or inject the time; exact float equality → thresholds or `pytest.approx`. Flaky tests are worse than they look: they teach people to ignore red.
+
+**Q2. Why does every test get a throwaway MLflow?**
+Tests run everywhere and often. Touching the real registry would register junk versions or move the real champion. Tests must be isolated and free of side effects.
+
+**Q3. A useless model passed "beats baseline". What went wrong, and how do you know your tests work?**
+There was no margin: 0.503 > 0.500 is noise. Require baseline + 0.10. You verify tests by breaking the code on purpose (shuffling labels, reintroducing the alias bug) and checking that they fail.
+
 ## Lessons
 
 - **Module 1:** the pre-commit large-file guard flagged `uv.lock` (a false positive) — tune guardrails, don't disable them.
@@ -227,3 +285,5 @@ The prediction log gives the model version (Module 9) → its training run → `
 - **Module 3:** my prediction (GBM ~0.80 AUC) was wrong — logistic regression won 0.743 vs 0.737 on val; small, mostly linear tabular data favours GLM-like models. GBM under-predicted the level by 4.5 pp (mean_pred 0.255 vs 0.300), which AUC can't see. With 15 rows per decile, calibration bins carry ~12 pp of noise, and the val/test AUC gap (0.74 vs 0.79) is noise too. Loading a joblib/pickle file executes code — only load trusted files.
 - **Module 4:** ops tooling can fail silently too — list showed no champion while one was set; Module 5 tests should cover registry list.
 - **Module 4:** my prediction of 4 versions was wrong — there were 2, because only winners are registered (runs = evidence, versions = candidates). Versions 1–2 were trained on a dirty tree, so their code couldn't be reproduced → the rule is now enforced in `promote`.
+- **Module 5:** flaky-test causes — I picked network + time, and missed unseeded randomness and exact float equality. I'd also have pointed the tests at the real `mlflow.db`; a per-test throwaway registry is the fix.
+- **Module 5 (sabotage):** shuffled training labels were caught only by the AUC floor. "Beats baseline" passed on noise (now fixed with a margin). Mean PD passed — correctly: ranking and level are independent, so you need both checks. My prediction (the first two fail) was half right. Safe revert trick: stage the current file before `git restore`, so it restores today's version, not the last commit.

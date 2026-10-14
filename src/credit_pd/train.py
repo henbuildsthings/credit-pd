@@ -18,7 +18,6 @@ deploy: the new version has no alias until someone runs `make promote`.
 """
 
 import hashlib
-import json
 import sys
 
 import mlflow
@@ -32,6 +31,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
 from credit_pd.config import ROOT, load_config, path
+from credit_pd.data import content_sha256
 from credit_pd.features import NON_FEATURES, build_preprocessor
 from credit_pd.metrics import evaluate
 from credit_pd.registry import git, setup_mlflow
@@ -44,9 +44,8 @@ MODEL_CLASSES: dict[str, type[ClassifierMixin]] = {
 }
 
 
-def load_splits(cfg: dict) -> dict[str, pd.DataFrame]:
+def load_splits(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Return {"train", "val", "test"} DataFrames. The `future` split is never returned."""
-    df = pd.read_parquet(path(cfg, "splits"))
     return {name: df[df["split"] == name] for name in ("train", "val", "test")}
 
 
@@ -73,22 +72,24 @@ def xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     return df.drop(columns=NON_FEATURES), df["default"]
 
 
-def run_tags(cfg: dict) -> dict[str, str]:
+def run_tags(cfg: dict, data: pd.DataFrame) -> dict[str, str]:
     """The reproducibility contract: everything needed to recreate this exact model.
 
-    Code (git SHA + whether there were uncommitted changes), data (content hash from the
-    committed manifest), environment (hash of uv.lock) and randomness (seed). A dirty
+    Code (git SHA + whether there were uncommitted changes), data (content hash of the
+    rows actually trained on), environment (hash of uv.lock) and randomness (seed). A dirty
     working tree means the SHA doesn't fully describe the code, so it prints a warning.
+
+    `data` is the splits frame; without its `split` column it is exactly the ingested
+    data, so its hash equals `content_sha256` in data/manifest.json for real runs.
     """
     dirty = bool(git("status", "--porcelain"))
     if dirty:
         warning = "WARNING: uncommitted changes; git_sha does not fully describe this code."
         print(warning, file=sys.stderr)
-    manifest = json.loads(path(cfg, "manifest").read_text())
     return {
         "git_sha": git("rev-parse", "HEAD"),
         "git_dirty": str(dirty).lower(),
-        "data_sha256": manifest["content_sha256"],
+        "data_sha256": content_sha256(data.drop(columns="split")),
         "uv_lock_sha256": hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest(),
         "seed": str(cfg["seed"]),
     }
@@ -104,16 +105,22 @@ def calibration(metrics: dict) -> pd.DataFrame:
     return pd.DataFrame(metrics["calibration"]).set_index("bin")
 
 
-def train() -> None:
-    """Fit, compare on val, test the winner once, log + register in MLflow, print a report."""
-    cfg = load_config()
+def train(cfg: dict | None = None, data: pd.DataFrame | None = None) -> int:
+    """Fit, compare on val, test the winner once, log + register in MLflow, print a report.
+
+    Defaults to `config.yaml` and the splits file from `make ingest`. Tests pass their own
+    config (pointing MLflow at a temporary folder) and a small splits frame instead.
+    Returns the new registered version number.
+    """
+    cfg = cfg or load_config()
+    data = pd.read_parquet(path(cfg, "splits")) if data is None else data
     model_name = setup_mlflow(cfg)
-    splits = load_splits(cfg)
+    splits = load_splits(data)
     X_train, y_train = xy(splits["train"])
     X_val, y_val = xy(splits["val"])
 
     with mlflow.start_run(run_name="train") as parent:
-        mlflow.set_tags(run_tags(cfg))
+        mlflow.set_tags(run_tags(cfg, data))
 
         # Fit on train only; compare on val. predict_proba[:, 1] = P(default).
         val_metrics, fitted = {}, {}
@@ -158,6 +165,7 @@ def train() -> None:
     print(calibration(val_metrics[winner]).round(3).to_string())
     print(f"\nMLflow run: {parent.info.run_id}")
     print(f"Registered {model_name} version {info.registered_model_version} (no alias set)")
+    return info.registered_model_version
 
 
 if __name__ == "__main__":
