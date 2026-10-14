@@ -132,6 +132,12 @@ make train                                # retrain on the new data (after the c
 - **Baseline = `DummyClassifier(strategy="prior")`.** Predicts the training default rate for everyone (AUC 0.5); any real model must clearly beat it.
 - **Sensible defaults, no hyperparameter tuning.** Model settings live in `config.yaml` under `models`; with 550 training rows, tuning would mostly fit noise.
 - **`joblib` is declared explicitly in `pyproject.toml`** because `src/` imports it, even though scikit-learn already pulls it in.
+- **All three models are logged as nested child runs; only the winner is registered.** Runs keep the evidence for every candidate, including the losers; the registry holds only production candidates.
+- **The `champion` alias is set only by an explicit `make promote` (a manual gate).** Each promotion tags the version with `promoted_by`, `promoted_at`, `reason` and `previous_champion`.
+- **The API loads the model by alias, so rollback = move the alias.** No code change or redeploy.
+- **`promote` refuses versions trained with `git_dirty=true`.** Enforced, with no override flag: commit and retrain.
+- **Every training run is tagged with** `git_sha`, `git_dirty`, `data_sha256`, `uv_lock_sha256` and `seed`.
+- **MLflow's agent hint is silenced** (`MLFLOW_DISABLE_AGENT_HINT=1` in the Makefile): noisy logs hide real warnings.
 - **Dev environment:** WSL2 Ubuntu, with the project in the Linux filesystem (not OneDrive or `/mnt/c`).
 
 ## Commands
@@ -158,6 +164,12 @@ make train                                # retrain on the new data (after the c
 ### Module 3 — Training pipeline
 
 - `make train` — run `python -m credit_pd.train`: fit all models on train, compare on val, test the winner once, save `models/model.joblib` and `reports/metrics.json`.
+
+### Module 4 — MLflow tracking and registry
+
+- `make models` — list registered versions with aliases, val/test AUC, data hash, git SHA, git_dirty and creation time.
+- `make promote VERSION=n REASON="..."` — move the `champion` alias to version n, tag who/when/why/previous, and smoke-score 3 test rows. Refuses dirty versions.
+- `make mlflow-ui` — MLflow web UI on http://localhost:5000 (Ctrl+C to stop).
 
 ## Interview questions
 
@@ -197,9 +209,21 @@ That it's noise: the AUC standard error is about 0.04 with 45 defaults. Call the
 **Q3. Two models have the same AUC, but one predicts a mean PD of 25% when 30% actually default. Which do you deploy?**
 The calibrated one. Decision bands use the absolute PD level, and AUC is blind to it. Otherwise, recalibrate (Platt scaling or isotonic regression) on held-out data.
 
+### Module 4 — MLflow tracking and registry
+
+**Q1. What's the difference between an MLflow run and a model version?**
+A run is one experiment's evidence: params, metrics, artifacts and tags, including for the models that lost. A version is a production candidate with a stable name and number. Log everything; register only the winner.
+
+**Q2. Why does the API load an alias instead of a version number?**
+The API asks for "champion", so promoting or rolling back just moves the alias — no code change, no redeploy. Rollback is `make promote VERSION=<previous>`, with the previous version found via the `previous_champion` tag.
+
+**Q3. An auditor asks how a specific decision was made. How do you trace it?**
+The prediction log gives the model version (Module 9) → its training run → `git_sha` (with `git_dirty=false`), `data_sha256` (compare with the manifest), `uv_lock_sha256` and `seed`. Check out that commit, run `make ingest` (the hash must match) and `make train` to reproduce the model. The promotion tags say who promoted it, when and why.
+
 ## Lessons
 
 - **Module 1:** the pre-commit large-file guard flagged `uv.lock` (a false positive) — tune guardrails, don't disable them.
 - **Module 2:** pandera's default error message dumps the whole schema for one extra column. Wrapping it to show only column, check and failing value was worth the extra lines. The line budget is a guide: trimming 153 → 139 was free, but going further meant dropping safeguards, so I stopped.
 - **Module 3:** my prediction (GBM ~0.80 AUC) was wrong — logistic regression won 0.743 vs 0.737 on val; small, mostly linear tabular data favours GLM-like models. GBM under-predicted the level by 4.5 pp (mean_pred 0.255 vs 0.300), which AUC can't see. With 15 rows per decile, calibration bins carry ~12 pp of noise, and the val/test AUC gap (0.74 vs 0.79) is noise too. Loading a joblib/pickle file executes code — only load trusted files.
 - **Module 4:** ops tooling can fail silently too — list showed no champion while one was set; Module 5 tests should cover registry list.
+- **Module 4:** my prediction of 4 versions was wrong — there were 2, because only winners are registered (runs = evidence, versions = candidates). Versions 1–2 were trained on a dirty tree, so their code couldn't be reproduced → the rule is now enforced in `promote`.
