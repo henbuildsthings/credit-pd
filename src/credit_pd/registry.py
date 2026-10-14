@@ -57,11 +57,16 @@ def list_versions(cfg: dict) -> pd.DataFrame:
 
     Metrics and reproducibility tags are read from each version's training run (the
     parent run that logged the model), so they are stored once, not copied onto versions.
+
+    Each version is re-fetched with `get_model_version`, because `search_model_versions`
+    returns versions with an empty `aliases` list (seen with MLflow 3.17 on SQLite), which
+    made the champion invisible in this table.
     """
     name = setup_mlflow(cfg)
     client = MlflowClient()
     rows = []
-    for v in client.search_model_versions(f"name = '{name}'"):
+    for found in client.search_model_versions(f"name = '{name}'"):
+        v = client.get_model_version(name, found.version)
         run = client.get_run(v.run_id).data
         rows.append(
             {
