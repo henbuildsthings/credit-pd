@@ -9,7 +9,7 @@ Guardrails for Claude Code in this repo. This is a small learning project: a cre
 - **Simplicity:** the simplest option wins unless told otherwise. No cloud services, Kubernetes, feature stores or orchestration frameworks.
 - **Layout & tooling:** package is `src/credit_pd/`, Python 3.12, managed with `uv`. Run everything via `uv run` or `make` targets.
 - **Config:** config values (seed, splits, decision bands) live in `config.yaml`, never hardcoded.
-- **Learning log:** update `LEARNING.md` when a module finishes (decisions, commands, interview questions, lessons).
+- **Learning log:** update `LEARNING.md` when a module finishes (decisions, commands, interview questions, lessons). Keep its "Working from the terminal" section in sync with the `Makefile` and code whenever targets or workflows change.
 - **Documentation:** every module, class and function gets a docstring explaining what it does and why (design choices, edge cases, how it fits the pipeline). Add short comments for non-obvious lines only, not line by line. Applies to all new and changed code.
 - **Scope:** only do the current module. Don't scaffold future modules.
 

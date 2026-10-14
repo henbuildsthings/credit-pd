@@ -2,6 +2,116 @@
 
 Running log of what was built, why, and what I should be able to explain.
 
+## Working from the terminal
+
+Generated from the `Makefile` and `src/`; keep it in sync when targets change.
+
+### Opening the project
+
+1. VS Code → File → Open Recent → `credit-pd [WSL: Ubuntu]`.
+2. Check the bottom-left corner says **WSL: Ubuntu** (otherwise you're on Windows and `uv`/`make` won't be found).
+3. Open a terminal (Ctrl+`) and start Claude Code: `claude` (new session) or `claude --continue` (resume the last one).
+4. `git status` — see where you left off.
+
+### How a command runs
+
+```
+make train                                 Makefile: names the task, exports MLFLOW_DISABLE_AGENT_HINT=1
+ └─ uv run python -m credit_pd.train       uv: runs inside .venv, synced to uv.lock first
+     └─ credit_pd/train.py                 reads config.yaml (via config.py)
+         ├─ reads   data/processed/splits.parquet, data/manifest.json, uv.lock, git
+         └─ writes  mlflow.db (runs, registry) + mlruns/ (artifacts, model)
+```
+
+Every target follows the same chain: `make <target>` → `uv run ...` → a module in `src/credit_pd/`.
+
+### Make targets
+
+| Target | Runs | What it does | Reads | Writes / changes | Re-run safe? |
+|---|---|---|---|---|---|
+| `help` (default) | grep over Makefile | Lists targets | `Makefile` | — | yes |
+| `setup` | `uv sync`, `pre-commit install` | Installs deps and git hooks | `pyproject.toml`, `uv.lock` | `.venv/`, `.git/hooks/pre-commit` | yes |
+| `lint` | `ruff check`, `ruff format --check` | Checks lint and formatting; fails, doesn't fix | `*.py` | — | yes |
+| `format` | `ruff check --fix`, `ruff format` | Auto-fixes lint and formatting | `*.py` | `*.py` in place | yes (review the diff) |
+| `test` | `pytest` | Runs tests (none yet — Module 5; fails until then) | `tests/` | `.pytest_cache/` | yes |
+| `loc` | `scripts/loc.py` | Code / total lines vs the ~800 budget | `src/`, `tests/` | — | yes |
+| `ingest` | `credit_pd.data` | Fetch/load, validate, hash, split; checks manifest | `config.yaml`, `data/manifest.json`, OpenML if raw missing | `data/raw/`, `data/processed/splits.parquet`, manifest on first run | yes (fails loudly on mismatch) |
+| `train` | `credit_pd.train` | Fits 3 models, picks on val, tests winner, registers it | `config.yaml`, splits, manifest, `uv.lock`, git | `mlflow.db`, `mlruns/` — **a new model version every run** | yes, but adds a version |
+| `models` | `credit_pd.registry list` | Table of versions, aliases, AUCs, hashes, git_dirty | `mlflow.db` | — | yes |
+| `promote VERSION=n REASON="..."` | `credit_pd.registry promote` | Moves the `champion` alias, tags who/when/why, smoke-scores 3 test rows | `mlflow.db`, `mlruns/`, splits, git | alias + version tags in `mlflow.db` | changes what's deployed; refuses dirty runs |
+| `mlflow-ui` | `mlflow ui --port 5000` | Web UI for runs and registry (runs until Ctrl+C) | `mlflow.db`, `mlruns/` | — | yes |
+| `serve` | placeholder | Scoring API (Module 6) | — | — | yes |
+| `monitor` | placeholder | Drift on `future` (Module 9) | — | — | yes |
+| `clean` | `rm`, `find` | Removes `.pytest_cache`, `.ruff_cache`, `__pycache__` | — | deletes caches | yes |
+
+### Typical workflows
+
+**First-time setup (fresh clone)**
+```bash
+git clone https://github.com/henbuildsthings/credit-pd.git && cd credit-pd
+make setup          # .venv + git hooks
+make ingest         # downloads data; must match the committed manifest
+make train          # first model version
+```
+
+**Daily start**
+```bash
+git status && git log --oneline -5
+make setup          # cheap; picks up dependency changes
+make models         # what's registered, what's champion
+```
+
+**Change code → lint → commit → train → promote**
+```bash
+make format && make lint
+git add -A && git commit -m "..."
+make train          # note the new version number
+make models         # compare it with the current champion
+make promote VERSION=<n> REASON="why this one"
+```
+Commit **before** training: the run tags `git_sha` and `git_dirty`. A model trained on uncommitted code can't be traced to a commit, so `promote` refuses it.
+
+**Inspect models**
+```bash
+make models
+make mlflow-ui      # open http://localhost:5000 in the Windows browser; Ctrl+C to stop
+```
+
+**Roll back the champion**
+```bash
+make mlflow-ui      # champion version → tag previous_champion shows what it replaced
+make promote VERSION=<previous> REASON="rollback: ..."
+```
+
+**Deliberate data update**
+```bash
+uv run python -m credit_pd.data --force   # re-download, rewrite data/manifest.json
+git diff data/manifest.json               # review what changed
+git add data/manifest.json && git commit -m "Data: ..."
+make train                                # retrain on the new data (after the commit)
+```
+
+### Git basics we use
+
+| Command | What it does |
+|---|---|
+| `git status` | What changed, what's staged, ahead/behind `origin` |
+| `git add -A` | Stage everything: new, modified, deleted |
+| `git commit -m "..."` | Commit staged changes; pre-commit hooks run here |
+| `git push` | Send commits to GitHub |
+| `git log --oneline` | One line per commit |
+| `git restore <file>` | Throw away uncommitted changes to a file (can't be undone) |
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `uv: command not found` | Terminal is PowerShell/Windows, not WSL | Reopen the folder as `[WSL: Ubuntu]`; check bottom-left |
+| `lockfile needs to be updated` | `pyproject.toml` changed without re-locking (seen with `--locked`) | `uv lock`, then commit `uv.lock` |
+| Commit fails, hook says "files were modified" | Hook auto-fixed formatting or whitespace | Review, then `git add -A && git commit -m "..."` again |
+| `Refusing to promote ... uncommitted code` | That version was trained with `git_dirty=true` | Commit, `make train`, promote the new version |
+| `mlflow ui`: port 5000 already in use | An old UI is still running | Ctrl+C it in its terminal, or `ss -ltnp \| grep :5000` and `kill <pid>` |
+
 ## Decisions
 
 - **Deployable unit = full sklearn Pipeline.** Preprocessing lives inside the pipeline; the API does no preprocessing of its own.
