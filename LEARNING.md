@@ -33,7 +33,7 @@ Every target follows the same chain: `make <target>` → `uv run ...` → a modu
 | `setup` | `uv sync`, `pre-commit install` | Installs deps and git hooks | `pyproject.toml`, `uv.lock` | `.venv/`, `.git/hooks/pre-commit` | yes |
 | `lint` | `ruff check`, `ruff format --check` | Checks lint and formatting; fails, doesn't fix | `*.py` | — | yes |
 | `format` | `ruff check --fix`, `ruff format` | Auto-fixes lint and formatting | `*.py` | `*.py` in place | yes (review the diff) |
-| `test` | `pytest -v` | All 17 tests, incl. integration (model sanity on real data) | `tests/`, `data/processed/splits.parquet` | `.pytest_cache/`; MLflow only in temp dirs | yes |
+| `test` | `pytest -v` | All tests, incl. integration (model sanity on real data) | `tests/`, `data/processed/splits.parquet` | `.pytest_cache/`; MLflow only in temp dirs | yes |
 | `test-fast` | `pytest -v -m "not integration"` | Unit, smoke and ops tests; no data needed (~8 s) | `tests/` | `.pytest_cache/`; MLflow only in temp dirs | yes |
 | `loc` | `scripts/loc.py` | Code / total lines vs the ~800 budget | `src/`, `tests/` | — | yes |
 | `ingest` | `credit_pd.data` | Fetch/load, validate, hash, split; checks manifest | `config.yaml`, `data/manifest.json`, OpenML if raw missing | `data/raw/`, `data/processed/splits.parquet`, manifest on first run | yes (fails loudly on mismatch) |
@@ -41,7 +41,7 @@ Every target follows the same chain: `make <target>` → `uv run ...` → a modu
 | `models` | `credit_pd.registry list` | Table of versions, aliases, AUCs, hashes, git_dirty | `mlflow.db` | — | yes |
 | `promote VERSION=n REASON="..."` | `credit_pd.registry promote` | Moves the `champion` alias, tags who/when/why, smoke-scores 3 test rows | `mlflow.db`, `mlruns/`, splits, git | alias + version tags in `mlflow.db` | changes what's deployed; refuses dirty runs |
 | `mlflow-ui` | `mlflow ui --port 5000` | Web UI for runs and registry (runs until Ctrl+C) | `mlflow.db`, `mlruns/` | — | yes |
-| `serve` | placeholder | Scoring API (Module 6) | — | — | yes |
+| `serve` | `uvicorn credit_pd.api:create_app --factory --host 0.0.0.0 --port 8000` | Scoring API; loads the champion once at startup (runs until Ctrl+C) | `config.yaml`, `mlflow.db`, `mlruns/` | — | yes; restart to pick up a new champion |
 | `monitor` | placeholder | Drift on `future` (Module 9) | — | — | yes |
 | `clean` | `rm`, `find` | Removes `.pytest_cache`, `.ruff_cache`, `__pycache__` | — | deletes caches | yes |
 
@@ -93,6 +93,15 @@ git add data/manifest.json && git commit -m "Data: ..."
 make train                                # retrain on the new data (after the commit)
 ```
 
+**Serve and call the API** (two terminals)
+```bash
+make serve                                   # terminal 1; Ctrl+C to stop
+curl localhost:8000/health                   # terminal 2 → {"status":"ok","model_version":3}
+curl -X POST localhost:8000/score -H "Content-Type: application/json" -d @examples/applicant.json
+                                             # → {"pd":0.0687,"band":"approve","model_name":"credit-pd","model_version":3}
+```
+Interactive docs (try requests in the browser): http://localhost:8000/docs in the Windows browser. After `make promote`, restart `make serve` — the API only loads the champion at startup.
+
 ### Git basics we use
 
 | Command | What it does |
@@ -112,6 +121,8 @@ make train                                # retrain on the new data (after the c
 | `lockfile needs to be updated` | `pyproject.toml` changed without re-locking (seen with `--locked`) | `uv lock`, then commit `uv.lock` |
 | Commit fails, hook says "files were modified" | Hook auto-fixed formatting or whitespace | Review, then `git add -A && git commit -m "..."` again |
 | `Refusing to promote ... uncommitted code` | That version was trained with `git_dirty=true` | Commit, `make train`, promote the new version |
+| `/health` returns 503 | No champion was set when the server started | `make models`, `make promote ...`, then restart `make serve` |
+| `/score` returns 422 | Input breaks the contract (unknown category, out of range, extra/missing field) | Read `detail` in the response; it names the field |
 | `mlflow ui`: port 5000 already in use | An old UI is still running | Ctrl+C it in its terminal, or `ss -ltnp \| grep :5000` and `kill <pid>` |
 
 ## Concepts
@@ -179,6 +190,13 @@ Every MLflow test gets a throwaway tracking DB and artifact folder in `tmp_path`
 - **Performance floor = 0.70 val AUC** (observed 0.743 minus a noise margin); **logreg must beat the baseline by 0.10 AUC.**
 - **`train()` takes a config and data** so tests can drive it; with no arguments it uses `config.yaml` and the splits file.
 - **The `data_sha256` tag hashes the rows actually trained on**, not the manifest value; for real runs the two are identical.
+- **The API loads the model once, at startup; a new champion takes effect only on restart/redeploy.** Not background reloading: that risks replicas serving different models, an unclear switch time, and more code.
+- **`load_champion` resolves the alias to a version number once**, then loads that version, so the reported `model_version` is always the loaded model.
+- **One `FEATURES` source of truth** (in `data.py`) generates both the pandera schema and the pydantic request model.
+- **The request model uses `extra="forbid"`; invalid input → 422** before the model runs.
+- **The band is computed from the rounded PD**, so a response is self-consistent.
+- **Bands (in `config.yaml`): approve PD < 0.15, review < 0.40, decline ≥ 0.40.**
+- **`pydantic` is declared explicitly** because `src/` imports it (fastapi already pulls it in).
 - **Dev environment:** WSL2 Ubuntu, with the project in the Linux filesystem (not OneDrive or `/mnt/c`).
 
 ## Commands
@@ -217,6 +235,12 @@ Every MLflow test gets a throwaway tracking DB and artifact folder in `tmp_path`
 - `make test` — run all tests (`pytest -v`), including integration tests on real data.
 - `make test-fast` — everything except integration (`pytest -v -m "not integration"`); no data needed.
 - `uv run pytest -v -m integration` — only the model sanity tests on real data.
+
+### Module 6 — FastAPI serving
+
+- `make serve` — run the API on http://localhost:8000 (docs at `/docs`); Ctrl+C to stop. Restart after `make promote`.
+- Latency loop (10 requests, seconds each):
+  `for i in $(seq 10); do curl -s -o /dev/null -w "%{time_total}\n" -X POST localhost:8000/score -H "Content-Type: application/json" -d @examples/applicant.json; done`
 
 ## Interview questions
 
@@ -278,6 +302,17 @@ Tests run everywhere and often. Touching the real registry would register junk v
 **Q3. A useless model passed "beats baseline". What went wrong, and how do you know your tests work?**
 There was no margin: 0.503 > 0.500 is noise. Require baseline + 0.10. You verify tests by breaking the code on purpose (shuffling labels, reintroducing the alias bug) and checking that they fail.
 
+### Module 6 — FastAPI serving
+
+**Q1. Why load the model at startup, and how does a new champion get picked up?**
+Loading per request adds hundreds of milliseconds and disk I/O on every call. A new champion arrives via restart/redeploy, so the change is explicit and logged, and all replicas switch together.
+
+**Q2. How do you prevent training/serving skew?**
+Ship the full Pipeline; generate the request schema from the same source as the training schema; build the input with the training column order and dtypes; and keep a parity test (API PD == `predict_proba` on the same row).
+
+**Q3. A request arrives with age 999. What should the API do?**
+Reject it with 422. Scoring garbage gives a confident, wrong PD — a silent failure. A rejection is loud.
+
 ## Lessons
 
 - **Module 1:** the pre-commit large-file guard flagged `uv.lock` (a false positive) — tune guardrails, don't disable them.
@@ -287,3 +322,4 @@ There was no margin: 0.503 > 0.500 is noise. Require baseline + 0.10. You verify
 - **Module 4:** my prediction of 4 versions was wrong — there were 2, because only winners are registered (runs = evidence, versions = candidates). Versions 1–2 were trained on a dirty tree, so their code couldn't be reproduced → the rule is now enforced in `promote`.
 - **Module 5:** flaky-test causes — I picked network + time, and missed unseeded randomness and exact float equality. I'd also have pointed the tests at the real `mlflow.db`; a per-test throwaway registry is the fix.
 - **Module 5 (sabotage):** shuffled training labels were caught only by the AUC floor. "Beats baseline" passed on noise (now fixed with a margin). Mean PD passed — correctly: ranking and level are independent, so you need both checks. My prediction (the first two fail) was half right. Safe revert trick: stage the current file before `git restore`, so it restores today's version, not the last commit.
+- **Module 6:** my latency prediction (~100 ms) was wrong — it's ~20 ms and flat (no cold start; the model is loaded at startup). The model itself takes microseconds; the time goes to HTTP, validation, building the DataFrame and encoding. Use the API for single decisions, batch scoring for portfolios.

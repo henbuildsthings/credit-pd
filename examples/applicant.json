@@ -1,0 +1,22 @@
+{
+  "checking_status": "no checking",
+  "duration": 24,
+  "credit_history": "existing paid",
+  "purpose": "furniture/equipment",
+  "credit_amount": 2835,
+  "savings_status": "500<=X<1000",
+  "employment": ">=7",
+  "installment_commitment": 3,
+  "personal_status": "male single",
+  "other_parties": "none",
+  "residence_since": 4,
+  "property_magnitude": "life insurance",
+  "age": 53,
+  "other_payment_plans": "none",
+  "housing": "own",
+  "existing_credits": 1,
+  "job": "skilled",
+  "num_dependents": 1,
+  "own_telephone": "none",
+  "foreign_worker": "yes"
+}

@@ -1,4 +1,4 @@
-# Project config. Decision bands etc. are added in later modules.
+# Project config: every tunable value lives here, never in the code.
 seed: 42
 
 data:
@@ -24,6 +24,12 @@ models:
     max_iter: 200
     learning_rate: 0.05
     max_depth: 3
+
+# Decision bands (credit policy, not model output) applied by the API to the PD:
+#   PD < approve_below -> approve;  approve_below <= PD < decline_from -> review;  else decline
+bands:
+  approve_below: 0.15
+  decline_from: 0.40
 
 # Experiment tracking and model registry (local MLflow; the registry of record).
 mlflow:

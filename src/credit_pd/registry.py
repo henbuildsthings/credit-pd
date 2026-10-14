@@ -124,15 +124,22 @@ def promote(cfg: dict, version: int, reason: str) -> None:
 
     splits = pd.read_parquet(path(cfg, "splits"))
     sample = splits[splits["split"] == "test"].head(3)
-    pd_scores = load_champion(cfg).predict_proba(sample.drop(columns=NON_FEATURES))[:, 1]
+    model, _ = load_champion(cfg)
+    pd_scores = model.predict_proba(sample.drop(columns=NON_FEATURES))[:, 1]
     print("Smoke check, 3 test rows:")
     print(pd.DataFrame({"pd": pd_scores.round(4), "actual_default": sample["default"].values}))
 
 
-def load_champion(cfg: dict | None = None) -> Pipeline:
-    """Load the current champion as the full sklearn Pipeline (raw rows in, PDs out)."""
+def load_champion(cfg: dict | None = None) -> tuple[Pipeline, int]:
+    """Load the current champion: (full sklearn Pipeline, version number).
+
+    Raw rows in, PDs out. The alias is resolved to a version number first and the model is
+    loaded by that number, so the returned model and version can't disagree even if
+    someone moves the alias in between. Raises MlflowException if there is no champion.
+    """
     name = setup_mlflow(cfg or load_config())
-    return mlflow.sklearn.load_model(f"models:/{name}@{CHAMPION}")
+    version = MlflowClient().get_model_version_by_alias(name, CHAMPION).version
+    return mlflow.sklearn.load_model(f"models:/{name}/{version}"), int(version)
 
 
 if __name__ == "__main__":

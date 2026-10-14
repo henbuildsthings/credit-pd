@@ -43,8 +43,8 @@ promote: ## Set champion alias: make promote VERSION=n REASON="..."
 mlflow-ui: ## Open the MLflow UI on http://localhost:5000
 	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
 
-serve: ## Run the scoring API
-	@echo "not implemented (module 6)"
+serve: ## Run the scoring API on http://localhost:8000 (docs at /docs)
+	uv run uvicorn credit_pd.api:create_app --factory --host 0.0.0.0 --port 8000
 
 monitor: ## Check drift on future data
 	@echo "not implemented (module 9)"

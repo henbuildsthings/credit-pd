@@ -4,7 +4,7 @@ Run with `make ingest` or `python -m credit_pd.data [--force]`.
 
 Pipeline (see `ingest`):
     1. Load the raw data: from `data/raw/credit-g.parquet` if present, else from OpenML.
-    2. Validate it against `CreditSchema`, a strict pandera schema.
+    2. Validate it against `SCHEMA`, a strict pandera schema built from `FEATURES`.
     3. Fingerprint it with a content hash (`content_sha256`).
     4. Split it into train/val/test/future, stratified on the target and seeded.
     5. Compare everything with the committed `data/manifest.json`.
@@ -24,65 +24,72 @@ import json
 import pandas as pd
 import pandera.pandas as pa
 from pandera.errors import SchemaErrors
-from pandera.typing import Series
 from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
 
 from credit_pd.config import load_config, path
 
-# Shorthand for string-typed columns, to keep the schema below readable.
-Str = Series[str]
-
-
-def _cat(*values: str):
-    """Field for a categorical column: only these exact string values are allowed."""
-    return pa.Field(isin=list(values))
-
-
-class CreditSchema(pa.DataFrameModel):
-    """Contract for the credit-g data after `fetch` (20 features + binary `default` target).
-
-    - Column names and types are explicit. `strict = True` means a missing or unexpected
-      column fails validation, so upstream changes can't slip through unnoticed.
-    - Categorical columns are plain strings, limited to the values seen in the real data.
-      A new category (e.g. a new `purpose`) fails here instead of confusing the model later.
-    - Numeric ranges are sanity bounds, not tight statistical limits: they catch broken
-      data (negative amounts, age 150), not unusual but valid customers.
-    - Nulls aren't allowed anywhere (pandera's default is nullable=False).
-    """
-
-    checking_status: Str = _cat("<0", "0<=X<200", ">=200", "no checking")
-    duration: Series[int] = pa.Field(ge=1, le=120)  # loan duration in months
-    credit_history: Str = _cat(
+# The feature contract, in training column order: the single source of truth for what a
+# valid applicant looks like. A list = categorical string column with exactly these
+# allowed values (as seen in the real data). A dict = integer column with these bounds
+# (pandera and pydantic both understand ge/gt/le). Used by the pandera schema below and
+# by the API's request model (api.py), so the two can never drift apart.
+FEATURES: dict[str, list[str] | dict[str, int]] = {
+    "checking_status": ["<0", "0<=X<200", ">=200", "no checking"],
+    "duration": {"ge": 1, "le": 120},  # loan duration in months
+    "credit_history": [
         "all paid", "critical/other existing credit", "delayed previously",
         "existing paid", "no credits/all paid",
-    )  # fmt: skip
-    purpose: Str = _cat(
+    ],
+    "purpose": [
         "business", "domestic appliance", "education", "furniture/equipment", "new car",
         "other", "radio/tv", "repairs", "retraining", "used car",
-    )  # fmt: skip
-    credit_amount: Series[int] = pa.Field(gt=0, le=100_000)  # in Deutsche Mark
-    savings_status: Str = _cat("<100", "100<=X<500", "500<=X<1000", ">=1000", "no known savings")
-    employment: Str = _cat("unemployed", "<1", "1<=X<4", "4<=X<7", ">=7")
-    installment_commitment: Series[int]
-    personal_status: Str = _cat("female div/dep/mar", "male div/sep", "male mar/wid", "male single")
-    other_parties: Str = _cat("co applicant", "guarantor", "none")
-    residence_since: Series[int]
-    property_magnitude: Str = _cat("car", "life insurance", "no known property", "real estate")
-    age: Series[int] = pa.Field(ge=18, le=100)
-    other_payment_plans: Str = _cat("bank", "none", "stores")
-    housing: Str = _cat("for free", "own", "rent")
-    existing_credits: Series[int]
-    job: Str = _cat(
-        "high qualif/self emp/mgmt", "skilled", "unemp/unskilled non res", "unskilled resident"
-    )
-    num_dependents: Series[int]
-    own_telephone: Str = _cat("none", "yes")
-    foreign_worker: Str = _cat("no", "yes")
-    default: Series[int] = pa.Field(isin=[0, 1])  # target: 1 = bad credit (defaulted)
+    ],
+    "credit_amount": {"gt": 0, "le": 100_000},  # in Deutsche Mark
+    "savings_status": ["<100", "100<=X<500", "500<=X<1000", ">=1000", "no known savings"],
+    "employment": ["unemployed", "<1", "1<=X<4", "4<=X<7", ">=7"],
+    "installment_commitment": {},
+    "personal_status": ["female div/dep/mar", "male div/sep", "male mar/wid", "male single"],
+    "other_parties": ["co applicant", "guarantor", "none"],
+    "residence_since": {},
+    "property_magnitude": ["car", "life insurance", "no known property", "real estate"],
+    "age": {"ge": 18, "le": 100},
+    "other_payment_plans": ["bank", "none", "stores"],
+    "housing": ["for free", "own", "rent"],
+    "existing_credits": {},
+    "job": [
+        "high qualif/self emp/mgmt", "skilled", "unemp/unskilled non res", "unskilled resident",
+    ],
+    "num_dependents": {},
+    "own_telephone": ["none", "yes"],
+    "foreign_worker": ["no", "yes"],
+}  # fmt: skip
 
-    class Config:
-        strict = True  # missing or unexpected columns fail
+# pandas dtype per feature, as in training: categoricals are plain strings, the rest int64.
+DTYPES = {name: "str" if isinstance(spec, list) else "int64" for name, spec in FEATURES.items()}
+
+
+def _column(spec: list[str] | dict[str, int]) -> pa.Column:
+    """pandera column for one FEATURES entry: allowed values for strings, bounds for ints."""
+    if isinstance(spec, list):
+        return pa.Column(str, pa.Check.isin(spec))
+    return pa.Column(int, [getattr(pa.Check, op)(value) for op, value in spec.items()])
+
+
+# Contract for the credit-g data after `fetch`: the 20 FEATURES + binary `default` target.
+# - `strict=True`: a missing or unexpected column fails, so upstream changes can't slip
+#   through unnoticed.
+# - Categorical columns are plain strings limited to known values: a new category (e.g. a
+#   new `purpose`) fails here instead of confusing the model later.
+# - Numeric ranges are sanity bounds, not tight statistical limits: they catch broken data
+#   (negative amounts, age 150), not unusual but valid customers.
+# - Nulls aren't allowed anywhere (pandera's default is nullable=False).
+SCHEMA = pa.DataFrameSchema(
+    {name: _column(spec) for name, spec in FEATURES.items()}
+    | {"default": pa.Column(int, pa.Check.isin([0, 1]))},  # target: 1 = bad credit
+    name="credit-g",
+    strict=True,
+)
 
 
 def fetch(cfg: dict) -> pd.DataFrame:
@@ -107,14 +114,14 @@ def fetch(cfg: dict) -> pd.DataFrame:
 
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
-    """Check `df` against `CreditSchema` and return it unchanged if it passes.
+    """Check `df` against `SCHEMA` and return it unchanged if it passes.
 
     `lazy=True` collects every failure instead of stopping at the first one. On failure it
     raises a ValueError with a compact table (column, check, failing value, row index),
     because pandera's own message prints the entire schema and buries the actual problem.
     """
     try:
-        return CreditSchema.validate(df, lazy=True)
+        return SCHEMA.validate(df, lazy=True)
     except SchemaErrors as e:
         cases = e.failure_cases[["column", "check", "failure_case", "index"]].to_string(index=False)
         raise ValueError(f"credit-g failed schema validation:\n{cases}") from e

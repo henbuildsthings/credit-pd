@@ -7,6 +7,7 @@ Modules:
     metrics   PD evaluation: AUC, KS, Brier, calibration
     train     fit candidates, pick on val, test once, register in MLflow (`make train`)
     registry  MLflow setup, list/promote versions, load the champion
+    api       FastAPI scoring service: PD + decision band (`make serve`)
 """
 
 from importlib.metadata import version
